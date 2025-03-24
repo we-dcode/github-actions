@@ -1,0 +1,50 @@
+name: Login to Dcode Terraform Registry
+description: Login to Dcode Terraform Registry
+
+inputs:
+  username:
+    description: 'Dcode Terraform Registry username'
+    required: true
+  password:
+    description: 'Dcode Terraform Registry password'
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install oauth2c
+      shell: bash
+      run: |
+        curl -sSfL https://raw.githubusercontent.com/cloudentity/oauth2c/master/install.sh | \
+          sh -s -- -b /tmp latest
+        chmod +x /tmp/oauth2c
+
+    - name: Login to registry
+      shell: bash
+      run: |
+        TOKEN=$(/tmp/oauth2c 'https://login.dcode.tech' \
+          --client-id terraform-registry-automation \
+          --client-secret dcode \
+          --response-types token \
+          --grant-type password \
+          --scopes openid \
+          --auth-method client_secret_basic \
+          --username $REGISTRY_USER \
+          --password $REGISTRY_PASS \
+          --silent | jq '.access_token' -r \
+        )
+        
+        mkdir -p $HOME/.terraform.d
+        cat << EOF > $HOME/.terraform.d/credentials.tfrc.json
+            {
+              "credentials": {
+                "registry.dcode.tech": {
+                  "token": "$TOKEN"
+                }
+              }
+            }
+        EOF
+      env:
+        REGISTRY_USER: ${{ inputs.username }}
+        REGISTRY_PASS: ${{ inputs.password }}
+

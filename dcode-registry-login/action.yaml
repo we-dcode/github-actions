@@ -32,8 +32,9 @@ runs:
           exit 1
         fi
 
+        creds="${HOME}/.terraform.d/credentials.tfrc.json"
         body=$(mktemp)
-        trap 'rm -f "${body}"' EXIT
+        trap 'rm -f "${body}" "${creds}.tmp"' EXIT
         if ! status=$(curl -sS --retry 5 --retry-all-errors --retry-delay 5 --max-time 30 \
             -o "${body}" -w '%{http_code}' \
             --user "terraform-registry-automation:dcode" \
@@ -47,25 +48,27 @@ runs:
         fi
         if [ "${status}" != "200" ]; then
           # The error body of an OAuth2 token endpoint holds only an error code
-          # and a description, never the credentials.
-          reason=$(jq -r '[.error, .error_description] | map(select(. != null)) | join(": ")' "${body}" 2>/dev/null || true)
+          # and a description, never the credentials. One line, at most 200
+          # characters, '%' escaped: it must not start another workflow command.
+          reason=$({ jq -r '[.error, .error_description] | map(select(. != null)) | join(": ")' "${body}" 2>/dev/null || true; } \
+            | tr -d '\r\n' | cut -c1-200 | sed 's/%/%25/g')
           echo "::error::dcode-registry-login: login failed (HTTP ${status}${reason:+, ${reason}})"
           exit 1
         fi
 
-        token=$(jq -r '.access_token // empty' "${body}")
+        token=$(jq -r '.access_token // empty' "${body}" 2>/dev/null || true)
         if [ -z "${token}" ]; then
           echo "::error::dcode-registry-login: the login response has no access_token"
           exit 1
         fi
         echo "::add-mask::${token}"
 
-        # Keep the credentials of other hosts already in the file.
+        # Keep the credentials of other hosts already in the file, when it is
+        # one JSON object whose "credentials" (if any) is an object.
         umask 077
         mkdir -p "${HOME}/.terraform.d"
-        creds="${HOME}/.terraform.d/credentials.tfrc.json"
         existing='{}'
-        if [ -s "${creds}" ] && jq -e 'type == "object"' "${creds}" >/dev/null 2>&1; then
+        if [ -s "${creds}" ] && jq -e -s 'length == 1 and (.[0] | type == "object") and ((.[0].credentials // {}) | type == "object")' "${creds}" >/dev/null 2>&1; then
           existing=$(cat "${creds}")
         fi
         jq --arg t "${token}" '.credentials["registry.dcode.tech"] = {token: $t}' <<<"${existing}" > "${creds}.tmp"

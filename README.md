@@ -16,10 +16,11 @@ the token to `~/.terraform.d/credentials.tfrc.json` for `terraform init`.
 - Pin it to a full commit SHA, not `@main`.
 - The username and password come from Dcode. Store them as repository or
   organisation secrets; never write them into a workflow.
-- Needs `bash`, `curl` and `jq` on the runner (GitHub-hosted runners have them).
-  Nothing is downloaded or installed.
+- Needs `bash`, `curl` 7.71 or newer and `jq` on the runner (GitHub-hosted
+  runners have them). Nothing is downloaded or installed.
 - The token is masked in the log. Other hosts already in the credentials file
   are kept. On a self-hosted runner that keeps its home directory, delete
   `~/.terraform.d/credentials.tfrc.json` when the job ends.
 - On failure the step prints the HTTP status and the OAuth2 error code
-  (for example `invalid_grant` for a wrong password), never the credentials.
+  (for example `HTTP 401, access_denied: Invalid username or password`), never
+  the credentials.

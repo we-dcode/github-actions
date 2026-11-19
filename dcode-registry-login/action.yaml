@@ -1,50 +1,73 @@
 name: Login to Dcode Terraform Registry
-description: Login to Dcode Terraform Registry
+description: >-
+  Log in to registry.dcode.tech (Dcode's Terraform module registry) and write
+  the token to the Terraform CLI credentials file.
 
 inputs:
   username:
-    description: 'Dcode Terraform Registry username'
+    description: 'Dcode Terraform Registry username (store it as a secret)'
     required: true
   password:
-    description: 'Dcode Terraform Registry password'
+    description: 'Dcode Terraform Registry password (store it as a secret)'
     required: true
 
 runs:
   using: "composite"
   steps:
-    - name: Install oauth2c
-      shell: bash
-      run: |
-        curl -sSfL https://raw.githubusercontent.com/cloudentity/oauth2c/master/install.sh | \
-          sh -s -- -b /tmp latest
-        chmod +x /tmp/oauth2c
-
+    # Password grant against Dcode's login service with curl and jq (both on
+    # GitHub-hosted and the usual self-hosted images): nothing is downloaded or
+    # installed at run time. The client id and secret
+    # ("terraform-registry-automation" / "dcode") are Dcode's public automation
+    # client, not secrets; the username and password are.
     - name: Login to registry
       shell: bash
-      run: |
-        TOKEN=$(/tmp/oauth2c 'https://login.dcode.tech' \
-          --client-id terraform-registry-automation \
-          --client-secret dcode \
-          --response-types token \
-          --grant-type password \
-          --scopes openid \
-          --auth-method client_secret_basic \
-          --username $REGISTRY_USER \
-          --password $REGISTRY_PASS \
-          --silent | jq '.access_token' -r \
-        )
-        
-        mkdir -p $HOME/.terraform.d
-        cat << EOF > $HOME/.terraform.d/credentials.tfrc.json
-            {
-              "credentials": {
-                "registry.dcode.tech": {
-                  "token": "$TOKEN"
-                }
-              }
-            }
-        EOF
       env:
         REGISTRY_USER: ${{ inputs.username }}
         REGISTRY_PASS: ${{ inputs.password }}
+        LOGIN_URL: https://login.dcode.tech/token
+      run: |
+        set -euo pipefail
+        if [ -z "${REGISTRY_USER}" ] || [ -z "${REGISTRY_PASS}" ]; then
+          echo "::error::dcode-registry-login: the username and password inputs are empty (are the secrets set?)"
+          exit 1
+        fi
 
+        body=$(mktemp)
+        trap 'rm -f "${body}"' EXIT
+        if ! status=$(curl -sS --retry 5 --retry-all-errors --retry-delay 5 --max-time 30 \
+            -o "${body}" -w '%{http_code}' \
+            --user "terraform-registry-automation:dcode" \
+            --data-urlencode grant_type=password \
+            --data-urlencode scope=openid \
+            --data-urlencode "username=${REGISTRY_USER}" \
+            --data-urlencode "password=${REGISTRY_PASS}" \
+            "${LOGIN_URL}"); then
+          echo "::error::dcode-registry-login: could not reach ${LOGIN_URL}"
+          exit 1
+        fi
+        if [ "${status}" != "200" ]; then
+          # The error body of an OAuth2 token endpoint holds only an error code
+          # and a description, never the credentials.
+          reason=$(jq -r '[.error, .error_description] | map(select(. != null)) | join(": ")' "${body}" 2>/dev/null || true)
+          echo "::error::dcode-registry-login: login failed (HTTP ${status}${reason:+, ${reason}})"
+          exit 1
+        fi
+
+        token=$(jq -r '.access_token // empty' "${body}")
+        if [ -z "${token}" ]; then
+          echo "::error::dcode-registry-login: the login response has no access_token"
+          exit 1
+        fi
+        echo "::add-mask::${token}"
+
+        # Keep the credentials of other hosts already in the file.
+        umask 077
+        mkdir -p "${HOME}/.terraform.d"
+        creds="${HOME}/.terraform.d/credentials.tfrc.json"
+        existing='{}'
+        if [ -s "${creds}" ] && jq -e 'type == "object"' "${creds}" >/dev/null 2>&1; then
+          existing=$(cat "${creds}")
+        fi
+        jq --arg t "${token}" '.credentials["registry.dcode.tech"] = {token: $t}' <<<"${existing}" > "${creds}.tmp"
+        mv "${creds}.tmp" "${creds}"
+        echo "Logged in to registry.dcode.tech"
